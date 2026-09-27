@@ -6,13 +6,35 @@ from concurrent.futures import ThreadPoolExecutor
 
 from rich.table import Table
 
-from .util import (HOME, confirm, console, dir_size, have, human_size, remove_tree,
-                   run, short_path, size_style)
+from .util import (HOME, WINDOWS, confirm, console, dir_size, have, human_size,
+                   is_real_dir, remove_tree, run, run_full, short_path, size_style)
 
 h = lambda *p: os.path.join(HOME, *p)
+LOCAL = os.environ.get("LOCALAPPDATA") or h("AppData", "Local")
+ROAMING = os.environ.get("APPDATA") or h("AppData", "Roaming")
+lo = lambda *p: os.path.join(LOCAL, *p)
+ro = lambda *p: os.path.join(ROAMING, *p)
 
 # key, label, path, clean command (None -> delete dir contents), note
-CACHES = [
+WINDOWS_CACHES = [
+    ("pip",      "pip cache",            lo("pip", "Cache"),          ["pip", "cache", "purge"], ""),
+    ("uv",       "uv cache",             lo("uv", "cache"),           ["uv", "cache", "clean"], ""),
+    ("npm",      "npm cache",            lo("npm-cache", "_cacache"), ["npm", "cache", "clean", "--force"], ""),
+    ("yarn",     "yarn cache",           lo("Yarn", "Cache"),         ["yarn", "cache", "clean"], ""),
+    ("pnpm",     "pnpm store",           lo("pnpm", "store"),         ["pnpm", "store", "prune"], "prunes unused only"),
+    ("cargo",    "cargo registry",       h(".cargo", "registry"),     None, ""),
+    ("go",       "Go module cache",      h("go", "pkg", "mod"),       ["go", "clean", "-modcache"], ""),
+    ("gobuild",  "Go build cache",       lo("go-build"),              ["go", "clean", "-cache"], ""),
+    ("gradle",   "Gradle caches",        h(".gradle", "caches"),      None, ""),
+    ("maven",    "Maven repo",           h(".m2", "repository"),      None, ""),
+    ("nuget",    "NuGet packages",       h(".nuget", "packages"),     ["dotnet", "nuget", "locals", "all", "--clear"], ""),
+    ("hf",       "HuggingFace models",   h(".cache", "huggingface"),  None, "re-download is big!"),
+    ("temp",     "Temp files",           os.environ.get("TEMP") or lo("Temp"), None, "files in use are skipped"),
+    ("vscode",   "VS Code cache",        ro("Code", "Cache"),         None, "close VS Code first"),
+    ("chrome",   "Chrome cache",         lo("Google", "Chrome", "User Data", "Default", "Cache"), None, "close Chrome first"),
+    ("edge",     "Edge cache",           lo("Microsoft", "Edge", "User Data", "Default", "Cache"), None, "close Edge first"),
+]
+LINUX_CACHES = [
     ("pip",      "pip cache",            h(".cache", "pip"),          ["pip", "cache", "purge"], ""),
     ("uv",       "uv cache",             h(".cache", "uv"),           ["uv", "cache", "clean"], ""),
     ("npm",      "npm cache",            h(".npm", "_cacache"),       ["npm", "cache", "clean", "--force"], ""),
@@ -30,6 +52,28 @@ CACHES = [
     ("chrome",   "Chrome cache",         h(".cache", "google-chrome"), None, "close Chrome first"),
     ("firefox",  "Firefox cache",        h(".cache", "mozilla"),      None, "close Firefox first"),
 ]
+CACHES = WINDOWS_CACHES if WINDOWS else LINUX_CACHES
+
+
+def recycle_bin_usage():
+    """Bytes in the Windows Recycle Bin (all drives), or None."""
+    if not WINDOWS:
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class SHQUERYRBINFO(ctypes.Structure):
+        _fields_ = [("cbSize", wintypes.DWORD), ("i64Size", ctypes.c_longlong),
+                    ("i64NumItems", ctypes.c_longlong)]
+
+    info = SHQUERYRBINFO()
+    info.cbSize = ctypes.sizeof(info)
+    try:
+        if ctypes.windll.shell32.SHQueryRecycleBinW(None, ctypes.byref(info)) != 0:
+            return None
+    except (AttributeError, OSError):
+        return None
+    return info.i64Size or None
 
 
 def journal_usage():
@@ -85,6 +129,7 @@ def collect():
         sizes = list(pool.map(dir_size, [c[2] for c in present]))
         j, a, d = pool.submit(journal_usage), pool.submit(apt_usage), pool.submit(docker_usage)
         snaps = pool.submit(snap_disabled)
+        rbin = pool.submit(recycle_bin_usage)
     user = [{"key": c[0], "label": c[1], "path": c[2], "cmd": c[3], "note": c[4],
              "size": s} for c, s in zip(present, sizes) if s > 0]
     user.sort(key=lambda r: r["size"], reverse=True)
@@ -95,6 +140,9 @@ def collect():
     if a.result():
         system.append({"key": "apt", "label": "apt package cache", "size": a.result(),
                        "fix": "sudo apt clean && sudo apt autoremove --purge"})
+    if rbin.result():
+        system.append({"key": "recyclebin", "label": "Recycle Bin", "size": rbin.result(),
+                       "fix": "Clear-RecycleBin -Force   (PowerShell, permanent!)"})
     if d.result():
         system.append({"key": "docker", "label": "Docker (reclaimable)", "size": d.result(),
                        "fix": "docker system prune  (add -a --volumes for everything)"})
@@ -120,7 +168,8 @@ def show(user, system):
     console.print(f"[bold]{human_size(total)}[/] in user caches. "
                   f"Clean with: [bold]devmedic caches --clean pip npm …[/] or [bold]--clean all[/]")
     if system:
-        s = Table(title="System (needs sudo / docker)", title_justify="left")
+        needs = "Administrator / PowerShell" if WINDOWS else "sudo / docker"
+        s = Table(title=f"System (needs {needs})", title_justify="left")
         s.add_column("Size", justify="right")
         s.add_column("What")
         s.add_column("Fix command", style="bold", overflow="fold")
@@ -128,7 +177,8 @@ def show(user, system):
             size = f"[{size_style(r['size'])}]{human_size(r['size'])}[/]" if r["size"] else "—"
             s.add_row(size, r["label"], r["fix"])
         console.print(s)
-        console.print("[dim]devmedic never runs sudo itself — copy the command if you want it.[/]")
+        console.print("[dim]devmedic never runs system-wide commands itself — "
+                      "copy the command if you want it.[/]")
 
 
 def clean(user, keys, assume_yes=False):
@@ -154,20 +204,30 @@ def clean(user, keys, assume_yes=False):
         ok = False
         if r["cmd"] and have(r["cmd"][0]):
             try:
-                ok = subprocess.run(r["cmd"], capture_output=True, timeout=300).returncode == 0
+                ok = run_full(r["cmd"], timeout=300).returncode == 0
             except (OSError, subprocess.SubprocessError):
                 ok = False
         if not ok:
-            ok = all(remove_tree(e.path) if e.is_dir(follow_symlinks=False)
-                     else _unlink(e.path) for e in os.scandir(r["path"]))
+            # Try every entry (a list, not a generator: one locked file must not
+            # stop the rest from being cleaned).
+            try:
+                entries = list(os.scandir(r["path"]))
+            except OSError:
+                entries = []
+            ok = all([_remove_entry(e) for e in entries])
         after = dir_size(r["path"]) if os.path.isdir(r["path"]) else 0
         mark = "[green]✔[/]" if ok else "[yellow]~[/]"
         console.print(f"{mark} {r['label']}: freed {human_size(max(r['size'] - after, 0))}")
 
 
-def _unlink(path):
+def _remove_entry(entry):
+    if is_real_dir(entry):
+        return remove_tree(entry.path)
     try:
-        os.unlink(path)
+        if entry.is_dir(follow_symlinks=False):
+            os.rmdir(entry.path)  # Windows junction: remove the link, never the target
+        else:
+            os.unlink(entry.path)
         return True
     except OSError:
         return False

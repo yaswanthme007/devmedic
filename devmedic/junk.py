@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
-from .util import (HOME, confirm, console, dir_size, display_path, human_age, human_size,
+from .util import (HOME, confirm, console, dir_size, display_path, is_real_dir, human_age, human_size,
                    remove_tree, short_path, size_style)
 
 # name -> (kind, check) ; check(parent_dir, junk_dir) says whether it's really junk
@@ -45,7 +45,9 @@ SKIP_DIRS = {".git", ".cache", ".local", ".npm", ".cargo", ".rustup", "snap",
              ".mozilla", ".config", ".vscode", ".vscode-server", ".var",
              ".m2", ".gradle", ".nvm", ".pyenv", ".docker", ".Trash"}
 # Skipped only directly under $HOME / filesystem root.
-SKIP_AT_TOP = {"go", "proc", "sys", "dev", "run", "tmp", "boot", "lost+found"}
+SKIP_AT_TOP = {"go", "proc", "sys", "dev", "run", "tmp", "boot", "lost+found",
+               # Windows: app data, cloud-synced folders (scanning can trigger downloads)
+               "AppData", "OneDrive", "iCloudDrive", "Dropbox", "scoop"}
 
 
 def find(root, max_depth=8):
@@ -59,13 +61,13 @@ def find(root, max_depth=8):
         except OSError:
             continue
         for e in entries:
-            if not e.is_dir(follow_symlinks=False):
+            if not is_real_dir(e):
                 continue
             pattern = PATTERNS.get(e.name)
             if pattern and pattern[1](current, e.path):
                 yield e.path, pattern[0]
                 continue
-            at_top = current in (HOME, "/")
+            at_top = current == HOME or os.path.dirname(current) == current  # ~ or a drive root
             if depth < max_depth and e.name not in SKIP_DIRS and not (
                     at_top and (e.name.startswith(".") or e.name in SKIP_AT_TOP)):
                 stack.append((e.path, depth + 1))

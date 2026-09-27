@@ -9,11 +9,17 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        include:
+          - os: windows-latest
+            python: "3.9"
+          - os: windows-latest
+            python: "3.13"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -24,29 +30,21 @@ jobs:
       - name: Unit tests
         run: python -m unittest discover -s tests -v
       - name: Smoke test the installed command
+        # Piped output exercises the non-interactive path (and, on Windows,
+        # the legacy code page -> UTF-8 switch).
         run: |
           devmedic --version
           devmedic all
+          devmedic system
+          devmedic memory
+          devmedic storage
+          devmedic network
+          devmedic tools
+          devmedic projects
+          devmedic cleanup
+          devmedic notes
           devmedic ports -a
+          devmedic procs -v
           devmedic caches
-
-  # Native Windows isn't supported yet — make sure it fails politely, not with a crash.
-  windows-message:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Install
-        run: python -m pip install .
-      - name: devmedic shows the WSL message and exits 1
-        shell: pwsh
-        run: |
-          $out = devmedic 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Output $out
-          if ($code -ne 1) { Write-Error "expected exit code 1, got $code"; exit 1 }
-          if ($out -notmatch "WSL") { Write-Error "WSL hint missing"; exit 1 }
-          if ($out -match "Traceback") { Write-Error "crashed"; exit 1 }
-          exit 0
+          devmedic junk .
+          devmedic repos .

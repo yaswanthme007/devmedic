@@ -124,21 +124,25 @@ def build_parser():
     return p
 
 
-WSL_URL = "https://learn.microsoft.com/windows/wsl/install"
+def utf8_output():
+    """Windows pipes/redirects default to a legacy code page that can't print
+    emoji or box-drawing characters; switch to UTF-8 instead of crashing."""
+    for stream in (sys.stdout, sys.stderr):
+        enc = (getattr(stream, "encoding", "") or "").lower().replace("-", "")
+        if enc != "utf8" and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
 
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
     if sys.platform == "win32":
-        console.print("[bold yellow]devmedic doesn't support native Windows yet.[/]\n"
-                      "It works great inside WSL (Ubuntu on Windows):\n"
-                      f"  1. Install WSL: [cyan]{WSL_URL}[/]\n"
-                      "  2. In the Ubuntu terminal: [bold]pipx install devmedic[/]\n"
-                      "Native Windows support is coming in a future release.")
-        return 1
-    if not sys.platform.startswith("linux"):
-        console.print("[yellow]devmedic is built for Linux; some checks may be "
-                      "missing on this system.[/]")
+        utf8_output()
+    elif not sys.platform.startswith("linux"):
+        console.print("[yellow]devmedic supports Linux and Windows; on this system "
+                      "some checks may be missing.[/]")
     if not getattr(args, "func", None):
         args.func = cmd_overview
     try:

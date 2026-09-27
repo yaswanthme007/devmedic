@@ -10,7 +10,14 @@ import time
 import unittest
 from contextlib import redirect_stdout
 
-from devmedic import caches, cli, junk, ports, repos, util
+from devmedic import caches, cli, junk, menu, ports, repos, util
+
+WINDOWS = sys.platform == "win32"
+
+
+def rel(path, root):
+    """Relative path with forward slashes, so expectations work on every OS."""
+    return os.path.relpath(path, root).replace(os.sep, "/")
 
 
 def write(path, size=1000):
@@ -33,6 +40,7 @@ class UtilTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             junk.parse_selection("abc", 3)
 
+    @unittest.skipIf(WINDOWS, "scandir doesn't report hardlink counts on Windows")
     def test_dir_size_counts_hardlinks_once(self):
         with tempfile.TemporaryDirectory() as d:
             write(os.path.join(d, "a"), 100_000)
@@ -59,7 +67,7 @@ class JunkTests(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def found(self):
-        return sorted(os.path.relpath(p, self.root) for p, _ in junk.find(self.root))
+        return sorted(rel(p, self.root) for p, _ in junk.find(self.root))
 
     def test_detects_only_real_junk(self):
         self.assertEqual(self.found(), ["py2/.venv", "rust/target", "web/node_modules"])
@@ -70,6 +78,7 @@ class JunkTests(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             junk.clean(target, assume_yes=True)
         self.assertFalse(os.path.exists(os.path.join(self.root, "rust", "target")))
+        self.assertEqual(len(target), 1)
         self.assertTrue(os.path.exists(os.path.join(self.root, "rust", "Cargo.toml")))
         self.assertTrue(os.path.exists(os.path.join(self.root, "web", "node_modules")))
         self.assertTrue(os.path.exists(os.path.join(self.root, "notes", "target")))
@@ -78,7 +87,7 @@ class JunkTests(unittest.TestCase):
         old = os.path.join(self.root, "web", "package.json")
         past = time.time() - 90 * 86400
         os.utime(old, (past, past))
-        paths = [os.path.relpath(i["path"], self.root) for i in junk.scan(self.root, 30)]
+        paths = [rel(i["path"], self.root) for i in junk.scan(self.root, 30)]
         self.assertEqual(paths, ["web/node_modules"])
 
 
@@ -173,24 +182,68 @@ class CacheTests(unittest.TestCase):
             shutil.rmtree(u["path"])
 
 
-class WindowsTests(unittest.TestCase):
-    """Native Windows isn't supported yet: it must fail politely, not crash."""
+class CrossPlatformTests(unittest.TestCase):
+    def test_is_mine(self):
+        me = util.current_user()
+        self.assertTrue(util.is_mine(me))
+        self.assertTrue(util.is_mine("SOME-PC\\" + me.upper()))  # Windows DOMAIN\user
+        self.assertFalse(util.is_mine("definitely-not-" + me))
+        self.assertFalse(util.is_mine(None))
 
-    def test_friendly_message_on_windows(self):
-        code = (
-            "import sys\n"
-            "sys.modules['termios'] = None\n"   # simulate: module doesn't exist
-            "sys.modules['tty'] = None\n"
-            "from devmedic import cli\n"         # must import without termios
-            "sys.platform = 'win32'\n"
-            "sys.exit(cli.main([]))\n"
-        )
-        env = dict(os.environ, COLUMNS="100")
-        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                           env=env, cwd=os.path.dirname(os.path.dirname(__file__)))
-        self.assertEqual(r.returncode, 1, r.stderr)
-        self.assertNotIn("Traceback", r.stderr)
-        self.assertIn("WSL", r.stdout)
+    def test_windows_key_decoding(self):
+        d = menu.decode_windows_key
+        self.assertEqual(d("\xe0", "H"), "up")
+        self.assertEqual(d("\x00", "P"), "down")
+        self.assertEqual(d("\r"), "enter")
+        self.assertEqual(d("q"), "quit")
+        self.assertEqual(d("7"), "7")
+        self.assertEqual(d("\xe0", "Z"), "other")
+        with self.assertRaises(KeyboardInterrupt):
+            d("\x03")
+
+    def test_utf8_output_survives_legacy_encoding(self):
+        buf = io.TextIOWrapper(io.BytesIO(), encoding="cp1252")
+        old = sys.stdout
+        try:
+            sys.stdout = buf
+            cli.utf8_output()
+            print("🩺 ████ ╭─╮")  # would raise UnicodeEncodeError in cp1252
+            buf.flush()
+        finally:
+            sys.stdout = old
+        self.assertIn("🩺".encode("utf-8"), buf.buffer.getvalue())
+
+
+@unittest.skipUnless(WINDOWS, "Windows junctions")
+class JunctionTests(unittest.TestCase):
+    """pnpm and Windows use junctions; we must never follow or delete through them."""
+
+    def setUp(self):
+        self.root = tempfile.mkdtemp()
+        self.target = os.path.join(self.root, "real")
+        write(os.path.join(self.target, "node_modules", "pkg", "big"), 200_000)
+        write(os.path.join(self.target, "package.json"))
+        self.link = os.path.join(self.root, "link")
+        subprocess.run(["cmd", "/c", "mklink", "/J", self.link, self.target], check=True,
+                       capture_output=True)
+
+    def tearDown(self):
+        subprocess.run(["cmd", "/c", "rmdir", self.link], capture_output=True)
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def test_scan_does_not_follow_junction(self):
+        found = sorted(rel(p, self.root) for p, _ in junk.find(self.root))
+        self.assertEqual(found, ["real/node_modules"])
+
+    def test_size_ignores_junction(self):
+        with_link = util.dir_size(self.root)
+        self.assertLess(with_link, 2 * util.dir_size(self.target))
+
+    def test_removing_junction_keeps_target(self):
+        entry = next(e for e in os.scandir(self.root) if e.name == "link")
+        self.assertTrue(caches._remove_entry(entry))
+        self.assertFalse(os.path.exists(self.link))
+        self.assertTrue(os.path.exists(os.path.join(self.target, "node_modules", "pkg", "big")))
 
 
 class SmokeTests(unittest.TestCase):

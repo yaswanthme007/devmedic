@@ -7,7 +7,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from .junk import PATTERNS, SKIP_AT_TOP, SKIP_DIRS
-from .util import HOME, console, display_path, human_age, short_path
+from .util import HOME, console, display_path, human_age, is_real_dir, run_full, short_path
 
 
 def find(root, max_depth=6):
@@ -22,9 +22,9 @@ def find(root, max_depth=6):
             entries = list(os.scandir(current))
         except OSError:
             continue
-        at_top = current in (HOME, "/")
+        at_top = current == HOME or os.path.dirname(current) == current  # ~ or a drive root
         for e in entries:
-            if (depth < max_depth and e.is_dir(follow_symlinks=False)
+            if (depth < max_depth and is_real_dir(e)
                     and e.name not in SKIP_DIRS and e.name not in PATTERNS
                     and not (at_top and (e.name.startswith(".") or e.name in SKIP_AT_TOP))):
                 stack.append((e.path, depth + 1))
@@ -32,8 +32,7 @@ def find(root, max_depth=6):
 
 def git(repo, *args):
     try:
-        r = subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True,
-                           timeout=15)
+        r = run_full(["git", "-C", repo, *args])
         return r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""

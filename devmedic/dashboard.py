@@ -18,8 +18,8 @@ from rich.table import Table
 from rich.text import Text
 
 from . import caches, junk, ports, procs, repos
-from .util import (HOME, console, dir_size, have, human_age, human_size, run,
-                   short_path)
+from .util import (HOME, WINDOWS, console, dir_size, have, human_age, human_size, run,
+                   run_full, short_path)
 
 # ───────────────────────── visuals ─────────────────────────
 
@@ -93,7 +93,22 @@ def panel(body, title, color):
 
 # ───────────────────────── collectors ─────────────────────────
 
+def windows_version():
+    """'Windows 11 Pro' — platform.release() says '10' on Windows 11, so use the build."""
+    ver = platform.version()            # e.g. 10.0.22631
+    try:
+        build = int(ver.split(".")[2])
+    except (IndexError, ValueError):
+        build = 0
+    name = "11" if build >= 22000 else platform.release()
+    edition = getattr(platform, "win32_edition", lambda: "")() or ""
+    edition = {"Professional": "Pro", "Core": "Home"}.get(edition, edition)
+    return f"Windows {name} {edition}".strip()
+
+
 def os_name():
+    if WINDOWS:
+        return windows_version()
     try:
         with open("/etc/os-release") as f:
             for line in f:
@@ -104,14 +119,25 @@ def os_name():
     return platform.system()
 
 
+def tidy_cpu(name):
+    name = re.sub(r"\((R|TM)\)|CPU|Processor|\s@.*|\d+-Core", "", name)
+    return " ".join(name.split())
+
+
 def cpu_model():
+    if WINDOWS:
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as k:
+                return tidy_cpu(winreg.QueryValueEx(k, "ProcessorNameString")[0])
+        except OSError:
+            pass
     try:
         with open("/proc/cpuinfo") as f:
             for line in f:
                 if line.startswith("model name"):
-                    name = line.split(":", 1)[1].strip()
-                    name = re.sub(r"\((R|TM)\)|CPU|Processor|\s@.*", "", name)
-                    return " ".join(name.split())
+                    return tidy_cpu(line.split(":", 1)[1])
     except OSError:
         pass
     return platform.processor() or "unknown CPU"
@@ -136,15 +162,32 @@ def battery():
         return None
 
 
+def load_average():
+    try:
+        return psutil.getloadavg()  # emulated on Windows (zeros on the first call)
+    except (AttributeError, OSError):
+        return (0.0, 0.0, 0.0)
+
+
+def shell_name():
+    """The shell devmedic was started from (bash, zsh, pwsh, cmd…)."""
+    try:
+        name = psutil.Process(os.getppid()).name()
+    except psutil.Error:
+        name = os.environ.get("SHELL", "")
+    name = os.path.splitext(os.path.basename(name))[0]
+    return {"powershell": "Windows PowerShell"}.get(name.lower(), name)
+
+
 def system_info():
     return {
         "user": getpass.getuser(), "host": socket.gethostname(), "os": os_name(),
-        "kernel": platform.release(), "cpu": cpu_model(),
+        "kernel": platform.version() if WINDOWS else platform.release(), "cpu": cpu_model(),
         "cores": psutil.cpu_count(logical=True),
         "phys": psutil.cpu_count(logical=False),
-        "boot": psutil.boot_time(), "load": os.getloadavg(),
+        "boot": psutil.boot_time(), "load": load_average(),
         "temp": temperature(), "battery": battery(),
-        "shell": os.path.basename(os.environ.get("SHELL", "")),
+        "shell": shell_name(),
     }
 
 
@@ -155,8 +198,10 @@ def memory_hogs(limit=5):
         if mi and p.info["name"]:
             name = p.info["name"]
             # Group chrome/chromium helpers, "Web Content", etc. under the app.
-            name = re.sub(r"^(chrome|chromium|firefox|code|electron)\b.*", r"\1", name,
-                          flags=re.I)
+            if name.lower().endswith(".exe"):
+                name = name[:-4]
+            name = re.sub(r"^(chrome|chromium|firefox|code|electron|brave|msedge)\b.*", r"\1",
+                          name, flags=re.I)
             by_name[name][0] += mi.rss
             by_name[name][1] += 1
     return sorted(((n, rss, c) for n, (rss, c) in by_name.items()),
@@ -166,7 +211,9 @@ def memory_hogs(limit=5):
 def disks():
     seen, out = set(), []
     for p in psutil.disk_partitions(all=False):
-        if p.fstype in ("squashfs", "tmpfs", "overlay") or p.device in seen:
+        if p.fstype in ("squashfs", "tmpfs", "overlay", "") or p.device in seen:
+            continue  # "" = empty CD/DVD drive on Windows
+        if "cdrom" in p.opts:
             continue
         if p.mountpoint.startswith(("/snap", "/var/snap", "/run")):
             continue
@@ -181,7 +228,8 @@ def disks():
 
 
 TOOLS = [  # label, version command
-    ("git", ["git", "--version"]), ("python", ["python3", "--version"]),
+    ("git", ["git", "--version"]),
+    ("python", ["python", "--version"] if WINDOWS else ["python3", "--version"]),
     ("pip", ["pip3", "--version"]), ("node", ["node", "--version"]),
     ("npm", ["npm", "--version"]), ("pnpm", ["pnpm", "--version"]),
     ("yarn", ["yarn", "--version"]), ("bun", ["bun", "--version"]),
@@ -192,6 +240,10 @@ TOOLS = [  # label, version command
     ("gh", ["gh", "--version"]), ("code", ["code", "--version"]),
     ("nvim", ["nvim", "--version"]), ("vim", ["vim", "--version"]),
 ]
+if WINDOWS:
+    TOOLS = [t for t in TOOLS if t[0] not in ("gcc", "make", "vim")] + [
+        ("pwsh", ["pwsh", "--version"]), ("winget", ["winget", "--version"]),
+        ("wsl", ["wsl", "--version"]), ("dotnet", ["dotnet", "--version"])]
 VERSION_RE = re.compile(r"(\d+\.\d+(?:\.\d+)?)")
 
 
@@ -199,11 +251,13 @@ def tool_version(cmd):
     if not have(cmd[0]):
         return None
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=4)
+        r = run_full(cmd, timeout=4)
     except (OSError, subprocess.SubprocessError):
         return "?"
-    m = VERSION_RE.search(r.stdout + r.stderr)
-    return m.group(1) if m else "?"
+    # No version in the output = not really installed (e.g. Windows' "python"
+    # shortcut that just opens the Microsoft Store).
+    m = VERSION_RE.search((r.stdout + r.stderr).replace("\x00", ""))
+    return m.group(1) if m else None
 
 
 def dev_tools():
@@ -216,8 +270,8 @@ def docker_status():
     if not have("docker"):
         return {"state": "missing"}
     try:
-        r = subprocess.run(["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"],
-                           capture_output=True, text=True, timeout=5)
+        r = run_full(["docker", "ps", "--format", "{{.Names}}\t{{.Image}}\t{{.Status}}"],
+                     timeout=5)
     except (OSError, subprocess.SubprocessError):
         return {"state": "down"}
     if "permission denied" in r.stderr.lower():
@@ -232,21 +286,34 @@ def network():
     ips = []
     stats = psutil.net_if_stats()
     for name, addrs in psutil.net_if_addrs().items():
-        if name == "lo" or name.startswith(("docker", "br-", "veth", "virbr")):
+        if name == "lo" or name.startswith(("docker", "br-", "veth", "virbr", "Loopback",
+                                             "vEthernet", "VirtualBox", "VMware")):
             continue
         if name in stats and not stats[name].isup:
             continue
         for a in addrs:
-            if a.family == socket.AF_INET:
+            if a.family == socket.AF_INET and not a.address.startswith("169.254."):
                 ips.append((name, a.address))
-    wifi = None
-    if have("nmcli"):
-        for line in run(["nmcli", "-t", "-f", "active,ssid", "dev", "wifi"], timeout=3).splitlines():
-            if line.startswith("yes:"):
-                wifi = line[4:] or None
-                break
     io = psutil.net_io_counters()
-    return {"ips": ips, "wifi": wifi, "sent": io.bytes_sent, "recv": io.bytes_recv}
+    return {"ips": ips, "wifi": wifi_name(), "sent": io.bytes_sent, "recv": io.bytes_recv}
+
+
+def wifi_name():
+    if WINDOWS:
+        # "    SSID                   : MyNetwork"  (skip the BSSID line)
+        for line in run(["netsh", "wlan", "show", "interfaces"], timeout=4).splitlines():
+            key, _, value = line.partition(":")
+            if key.strip() == "SSID" and value.strip():
+                return value.strip()
+        return None
+    if have("nmcli"):
+        # Active connections only — `nmcli dev wifi` may trigger a slow rescan.
+        for line in run(["nmcli", "-t", "-f", "NAME,TYPE", "connection", "show", "--active"],
+                        timeout=3).splitlines():
+            name, _, kind = line.rpartition(":")
+            if kind == "802-11-wireless" and name:
+                return name.replace("\\:", ":")
+    return None
 
 
 def git_summary():
@@ -329,11 +396,15 @@ def health(d):
     if stale:
         hit(3 * len(stale), f"{len(stale)} dev server(s) running > 1 day → [bold]devmedic ports[/]")
     if d["docker"]["state"] == "denied":
-        hit(2, "Docker needs sudo → [bold]sudo usermod -aG docker $USER[/] then log out/in")
+        hit(2, DOCKER_FIX)
     bat = d["sys"]["battery"]
     if bat and not bat.power_plugged and bat.percent < 20:
         tips.append(f"[yellow]Battery low ({bat.percent:.0f}%)[/] — plug in before long builds")
     return max(score, 0), tips
+
+
+DOCKER_FIX = ("Docker isn't reachable → start [bold]Docker Desktop[/]" if WINDOWS else
+              "Docker needs sudo → [bold]sudo usermod -aG docker $USER[/] then log out/in")
 
 
 def grade(score):
@@ -350,7 +421,7 @@ def header(d, score):
     g, color = grade(score)
     info = Text.assemble(
         (f"{s['user']}", "bold cyan"), ("@", "grey50"), (f"{s['host']}\n", "bold magenta"),
-        (f"{s['os']}", "bold"), (f"  ·  kernel {s['kernel']}\n", "grey62"),
+        (f"{s['os']}", "bold"), (f"  ·  {'build' if WINDOWS else 'kernel'} {s['kernel']}\n", "grey62"),
         (f"up {human_age(s['boot']).replace(' ago', '')}", "green"),
         (f"  ·  {s['shell'] or 'shell ?'}  ·  {time.strftime('%a %d %b %H:%M')}", "grey62"),
     )

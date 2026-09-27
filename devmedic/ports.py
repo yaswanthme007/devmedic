@@ -1,19 +1,28 @@
 """Who is listening on which port, and killing them."""
-import os
-import signal
-import time
-
 import psutil
 from rich.table import Table
 
-from .util import confirm, console, short_path
+from .util import WINDOWS, confirm, console, is_mine, short_path
 
 
 # Friendly names for common root-owned services we can't inspect.
 WELL_KNOWN = {22: "sshd", 25: "smtp", 53: "DNS (systemd-resolved)", 80: "http",
               443: "https", 631: "CUPS printing", 3306: "MySQL", 5432: "PostgreSQL",
               6379: "Redis", 27017: "MongoDB", 5353: "mDNS (avahi)", 2375: "Docker",
-              11434: "Ollama"}
+              11434: "Ollama", 135: "Windows RPC", 139: "NetBIOS", 445: "SMB file sharing",
+              5040: "Windows CDP", 7680: "Delivery Optimization"}
+
+
+def admin_hint(pid=None, port=None):
+    """How to do something as root/Administrator on this OS."""
+    if WINDOWS:
+        if pid:
+            return f"run PowerShell as Administrator: [bold]Stop-Process -Id {pid} -Force[/]"
+        return (f"run PowerShell as Administrator: "
+                f"[bold]Get-NetTCPConnection -LocalPort {port} | Select OwningProcess[/]")
+    if pid:
+        return f"try: [bold]sudo kill {pid}[/]"
+    return f"try: [bold]sudo ss -ltnp 'sport = :{port}'[/]"
 
 
 def listening(include_system=False):
@@ -35,14 +44,16 @@ def listening(include_system=False):
                 "name": WELL_KNOWN.get(port, "?"), "cmd": "", "cwd": "", "user": "", "mine": False}
         if c.pid:
             try:
-                p = psutil.Process(c.pid)
-                info["name"] = p.name()
-                info["cmd"] = " ".join(" ".join(p.cmdline()).split())
-                info["user"] = p.username()
-                info["mine"] = p.uids().real == os.getuid()
-                info["cwd"] = p.cwd()
-            except (psutil.AccessDenied, psutil.NoSuchProcess, psutil.ZombieProcess):
-                pass
+                # as_dict: fields we're not allowed to read come back as None
+                # instead of aborting (common on Windows for other users' processes).
+                d = psutil.Process(c.pid).as_dict(["name", "cmdline", "username", "cwd"])
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                d = {}
+            info["name"] = d.get("name") or info["name"]
+            info["cmd"] = " ".join(" ".join(d.get("cmdline") or []).split())
+            info["user"] = d.get("username") or ""
+            info["mine"] = is_mine(info["user"])
+            info["cwd"] = d.get("cwd") or ""
         rows[key] = info
     result = sorted(rows.values(), key=lambda r: r["port"])
     if not include_system:
@@ -87,14 +98,14 @@ def kill(port, force=False, assume_yes=False):
     for r in targets:
         if not r["pid"]:
             console.print(f"[red]Port {port} is held by a process you can't see "
-                          f"(probably root).[/] Try: [bold]sudo ss -ltnp 'sport = :{port}'[/]")
+                          f"(probably a system service).[/] To find it, {admin_hint(port=port)}")
             status = 1
             continue
         console.print(f"Port [bold cyan]{port}[/] → PID {r['pid']} "
                       f"[bold]{r['name']}[/] [dim]{r['cmd'][:100]}[/]")
         if not r["mine"]:
             console.print(f"[yellow]Owned by {r['user'] or 'another user'}; "
-                          f"you may need sudo.[/]")
+                          f"you may need {'Administrator rights' if WINDOWS else 'sudo'}.[/]")
         if not confirm("Kill it?", assume_yes):
             continue
         status |= terminate(r["pid"], force)
@@ -117,7 +128,7 @@ def terminate(pid, force=False):
     except psutil.NoSuchProcess:
         pass
     except psutil.AccessDenied:
-        console.print(f"[red]Permission denied.[/] Try: [bold]sudo kill {pid}[/]")
+        console.print(f"[red]Permission denied.[/] To force it, {admin_hint(pid=pid)}")
         return 1
     except psutil.TimeoutExpired:
         console.print(f"[red]PID {pid} is still alive.[/]")

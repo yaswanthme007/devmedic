@@ -1,13 +1,38 @@
-"""Shared helpers: sizes, ages, confirmation prompts."""
+"""Shared helpers: sizes, ages, confirmation prompts, cross-platform bits."""
+import getpass
 import os
 import shutil
+import stat
 import subprocess
+import sys
 import time
 
 from rich.console import Console
 
 console = Console()
 HOME = os.path.expanduser("~")
+WINDOWS = sys.platform == "win32"
+_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def is_real_dir(entry):
+    """A directory we may descend into: not a symlink, and on Windows not a
+    junction/reparse point (pnpm and Windows itself use junctions)."""
+    try:
+        if not entry.is_dir(follow_symlinks=False):
+            return False
+        if WINDOWS:
+            attrs = entry.stat(follow_symlinks=False).st_file_attributes
+            return not attrs & _REPARSE_POINT
+    except OSError:
+        return False
+    return True
+
+
+def file_bytes(st):
+    """Bytes a file really occupies on disk (st_blocks isn't available on Windows)."""
+    blocks = getattr(st, "st_blocks", None)
+    return blocks * 512 if blocks is not None else st.st_size
 
 
 def dir_size(path):
@@ -24,16 +49,19 @@ def dir_size(path):
                         st = entry.stat(follow_symlinks=False)
                     except OSError:
                         continue
-                    if entry.is_dir(follow_symlinks=False):
+                    if is_real_dir(entry):
                         stack.append(entry.path)
                         continue
-                    # Hardlinked files (pnpm store, etc.) count once.
+                    if entry.is_dir(follow_symlinks=False):
+                        continue  # junction: don't follow, don't count
+                    # Hardlinked files (pnpm store, etc.) count once. On Windows
+                    # scandir doesn't report link counts, so this is Linux/macOS only.
                     if st.st_nlink > 1:
                         key = (st.st_dev, st.st_ino)
                         if key in seen:
                             continue
                         seen.add(key)
-                    total += st.st_blocks * 512
+                    total += file_bytes(st)
         except OSError:
             continue
     return total
@@ -90,12 +118,22 @@ def confirm(question, assume_yes=False):
     return answer.strip().lower() in ("y", "yes")
 
 
+def resolve(cmd):
+    """Full path for cmd[0] so Windows can launch npm.cmd, yarn.cmd, etc."""
+    exe = shutil.which(cmd[0])
+    return [exe, *cmd[1:]] if exe else list(cmd)
+
+
+def run_full(cmd, timeout=15):
+    """subprocess.run with text output that never fails on odd encodings."""
+    return subprocess.run(resolve(cmd), capture_output=True, text=True,
+                          errors="replace", timeout=timeout)
+
+
 def run(cmd, timeout=15):
     """Run a command, return stdout ('' on any failure)."""
     try:
-        return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        ).stdout
+        return run_full(cmd, timeout).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
@@ -104,6 +142,32 @@ def have(binary):
     return shutil.which(binary) is not None
 
 
+def current_user():
+    try:
+        return getpass.getuser().lower()
+    except Exception:  # no USER/USERNAME and no pwd entry
+        return ""
+
+
+def is_mine(username):
+    """Does a process owner string (e.g. 'alice' or 'LAPTOP\\alice') mean us?"""
+    if not username:
+        return False
+    return username.lower().rsplit("\\", 1)[-1] == current_user()
+
+
+def _force_remove(func, path, _exc):
+    # Windows refuses to delete read-only files (e.g. git objects): clear the flag, retry.
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
 def remove_tree(path):
-    shutil.rmtree(path, ignore_errors=True)
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=_force_remove)
+    else:
+        shutil.rmtree(path, onerror=_force_remove)
     return not os.path.exists(path)

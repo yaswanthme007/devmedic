@@ -25,13 +25,21 @@ devmedic answers all of them in seconds.
 
 ## Install
 
-Requires **Linux** (built and tested on Ubuntu) and **Python 3.9+**.
-On **Windows**, use it inside [WSL](https://learn.microsoft.com/windows/wsl/install) for now; native support is planned.
+Works on **Linux** (built on Ubuntu) and **Windows 10/11**, with **Python 3.9+**.
 
 **With pipx (recommended)**
 
+Linux:
+
 ```bash
 sudo apt install pipx && pipx ensurepath        # once
+pipx install devmedic
+```
+
+Windows (PowerShell or Windows Terminal):
+
+```powershell
+py -m pip install --user pipx; py -m pipx ensurepath   # once, then open a new terminal
 pipx install devmedic
 ```
 
@@ -93,7 +101,10 @@ devmedic is careful by design:
 - **Nothing is deleted without confirmation** (unless you pass `-y`).
 - **Conservative junk detection:** `target/` only next to `Cargo.toml`/`pom.xml`, venvs only if
   they contain `pyvenv.cfg`. Generic `build/` and `dist/` folders are **never** touched.
-- **Never runs `sudo`.** System fixes (journal, apt, snap, docker) are printed for you to copy.
+- **Links are never followed:** symlinks and Windows junctions (used by pnpm) are skipped when
+  scanning and removed as links, so nothing outside the folder is ever deleted.
+- **Never runs `sudo` or Administrator commands.** System fixes (journal, apt, snap, Recycle Bin,
+  docker) are printed for you to copy.
 - **Only kills what you confirm**, and can't touch other users' processes.
 - **Offline and private:** no network requests, no data collection.
 

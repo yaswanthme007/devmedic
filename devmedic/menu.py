@@ -9,7 +9,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import caches, dashboard as db, ports, procs, repos
-from .util import console, human_size, short_path
+from .util import WINDOWS, console, human_size, short_path
 
 # ───────────────────────── section details ─────────────────────────
 
@@ -50,8 +50,7 @@ def detail_tools(d):
             t.add_row(*row[:3])
         console.print(t)
     elif dk["state"] == "denied":
-        console.print("Fix Docker permissions: [bold]sudo usermod -aG docker $USER[/] "
-                      "then log out and back in.")
+        console.print(db.DOCKER_FIX)
 
 
 def detail_projects(d):
@@ -188,7 +187,29 @@ KEYS = {b"\x1b[A": "up", b"\x1bOA": "up", b"k": "up",
         b"r": "refresh", b"a": "all", b"w": "watch", b"\x1b[H": "home", b"\x1b[F": "end"}
 
 
+# Windows (msvcrt) sends special keys as a prefix + one letter.
+WINDOWS_KEYS = {"H": "up", "P": "down", "M": "enter", "K": "back", "G": "home", "O": "end"}
+
+
+def decode_windows_key(first, second=""):
+    """Map msvcrt.getwch() output to our key names (pure, so it's testable anywhere)."""
+    if first in ("\x00", "\xe0"):
+        return WINDOWS_KEYS.get(second, "other")
+    if first == "\x03":
+        raise KeyboardInterrupt
+    if first.isdigit():
+        return first
+    return KEYS.get(first.encode("utf-8", "ignore"), "other")
+
+
 def read_key():
+    if WINDOWS:
+        import msvcrt
+
+        first = msvcrt.getwch()
+        second = msvcrt.getwch() if first in ("\x00", "\xe0") else ""
+        return decode_windows_key(first, second)
+
     import termios  # POSIX only — imported here so the package loads everywhere
     import tty
 

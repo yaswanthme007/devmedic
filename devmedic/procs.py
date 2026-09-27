@@ -6,7 +6,7 @@ from collections import defaultdict
 import psutil
 from rich.table import Table
 
-from .util import HOME, console, human_age, human_size, short_path, size_style
+from .util import HOME, console, human_age, human_size, is_mine, short_path, size_style
 
 DEV_NAMES = {"node", "python", "python3", "java", "ruby", "go", "cargo", "rustc",
              "deno", "bun", "php", "dotnet", "gradle", "mvn", "npm", "pnpm", "yarn",
@@ -21,7 +21,10 @@ def is_dev(name, cmdline):
     base = name.split(".")[0].lower()
     if base in DEV_NAMES or name.lower() in DEV_NAMES:
         return True
-    return bool(cmdline) and os.path.basename(cmdline[0]).lower() in DEV_NAMES
+    if not cmdline:
+        return False
+    exe = os.path.basename(cmdline[0].replace("\\", "/")).lower()
+    return exe in DEV_NAMES or os.path.splitext(exe)[0] in DEV_NAMES
 
 
 def collect():
@@ -32,12 +35,12 @@ def collect():
                 ports[c.pid].add(c.laddr.port)
     except (psutil.AccessDenied, OSError):
         pass
-    me, self_pid = os.getuid(), os.getpid()
+    self_pid = os.getpid()
     rows = []
     for p in psutil.process_iter(["pid", "name", "cmdline", "memory_info", "create_time",
-                                  "uids", "cwd", "cpu_percent"]):
+                                  "username", "cwd"]):
         info = p.info
-        if not info["uids"] or info["uids"].real != me or info["pid"] == self_pid:
+        if info["pid"] == self_pid or not is_mine(info["username"]):
             continue
         if not is_dev(info["name"] or "", info["cmdline"] or []):
             continue
