@@ -74,11 +74,11 @@ class JunkTests(unittest.TestCase):
 
     def test_clean_deletes_only_selected(self):
         items = junk.scan(self.root)
-        target = [i for i in items if i["path"].endswith("rust/target")]
+        target = [i for i in items if rel(i["path"], self.root) == "rust/target"]
+        self.assertEqual(len(target), 1)
         with redirect_stdout(io.StringIO()):
             junk.clean(target, assume_yes=True)
         self.assertFalse(os.path.exists(os.path.join(self.root, "rust", "target")))
-        self.assertEqual(len(target), 1)
         self.assertTrue(os.path.exists(os.path.join(self.root, "rust", "Cargo.toml")))
         self.assertTrue(os.path.exists(os.path.join(self.root, "web", "node_modules")))
         self.assertTrue(os.path.exists(os.path.join(self.root, "notes", "target")))
@@ -240,7 +240,8 @@ class JunctionTests(unittest.TestCase):
         self.assertLess(with_link, 2 * util.dir_size(self.target))
 
     def test_removing_junction_keeps_target(self):
-        entry = next(e for e in os.scandir(self.root) if e.name == "link")
+        with os.scandir(self.root) as it:
+            entry = next(e for e in it if e.name == "link")
         self.assertTrue(caches._remove_entry(entry))
         self.assertFalse(os.path.exists(self.link))
         self.assertTrue(os.path.exists(os.path.join(self.target, "node_modules", "pkg", "big")))

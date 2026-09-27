@@ -78,13 +78,14 @@ def project_last_touched(junk_path):
     parent = os.path.dirname(junk_path)
     newest = 0
     try:
-        for e in os.scandir(parent):
-            if e.path == junk_path or e.name in PATTERNS:
-                continue
-            try:
-                newest = max(newest, e.stat(follow_symlinks=False).st_mtime)
-            except OSError:
-                pass
+        with os.scandir(parent) as it:
+            for e in it:
+                if e.path == junk_path or e.name in PATTERNS:
+                    continue
+                try:
+                    newest = max(newest, e.stat(follow_symlinks=False).st_mtime)
+                except OSError:
+                    pass
     except OSError:
         pass
     return newest or os.stat(junk_path).st_mtime
