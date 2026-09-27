@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install
+        run: python -m pip install .
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+      - name: Smoke test the installed command
+        run: |
+          devmedic --version
+          devmedic all
+          devmedic ports -a
+          devmedic caches
+
+  # Native Windows isn't supported yet — make sure it fails politely, not with a crash.
+  windows-message:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: python -m pip install .
+      - name: devmedic shows the WSL message and exits 1
+        shell: pwsh
+        run: |
+          $out = devmedic 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Output $out
+          if ($code -ne 1) { Write-Error "expected exit code 1, got $code"; exit 1 }
+          if ($out -notmatch "WSL") { Write-Error "WSL hint missing"; exit 1 }
+          if ($out -match "Traceback") { Write-Error "crashed"; exit 1 }
+          exit 0

@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "devmedic"
+dynamic = ["version"]
+description = "A health check for your developer machine: ports, junk folders, caches, git repos, dev processes — offline."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+dependencies = ["psutil>=5.8", "rich>=12.0"]
+keywords = ["developer-tools", "cli", "linux", "ubuntu", "cleanup", "ports", "disk-usage"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development",
+    "Topic :: System :: Monitoring",
+]
+
+[project.urls]
+Homepage = "https://github.com/yaswanthme007/devmedic"
+Issues = "https://github.com/yaswanthme007/devmedic/issues"
+
+[project.scripts]
+devmedic = "devmedic.cli:main"
+
+[tool.setuptools]
+packages = ["devmedic"]
+
+[tool.setuptools.dynamic]
+version = { attr = "devmedic.__version__" }
